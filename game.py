@@ -1,4 +1,5 @@
 from ast import Tuple
+import colorsys
 import random
 import sys
 import threading
@@ -20,6 +21,7 @@ from globals import (BG_COLOR, BLACK, CELL_EDGE, COOL, PAUSE_IS_PRESSED, DEAD, D
                      TOP_BORDER)
 from grid import Grid
 from screens import Screen
+from solver import Solver, pct
 from sprites import SPRITES
 from textbox import Textbox
 
@@ -30,6 +32,14 @@ class Game(Client):
 
     font = pygame.font.Font(FONTS + "Font.ttf", FONT_SIZE)
     pause_font = pygame.font.Font(FONTS + "Font.ttf", PAUSE_FONT_SIZE)
+    prob_font = pygame.font.Font(FONTS + "Font.ttf", int(CELL_EDGE * 0.42))
+    prob_font_small = pygame.font.Font(FONTS + "Font.ttf", int(CELL_EDGE * 0.34))
+
+    # AUTO SOLVER pacing (seconds): one certain move, showing the probabilities
+    # before acting on them, and highlighting a guess before clicking it.
+    SOLVER_STEP = 0.25
+    SOLVER_PROB = 0.9
+    SOLVER_GUESS = 0.6
 
     def __init__(self) -> None:
         super().__init__()
@@ -56,6 +66,12 @@ class Game(Client):
                 self.textboxes.append(Textbox(setting, TOP_BORDER * 1.3 + (Textbox.box_height + 20) * i))
                
         self.grid = Grid()
+        self.solving = False      # the solver thread is playing
+        self.solver_board = False # the board belongs to an AUTO SOLVER run
+        self.solver_status = ""
+        self.probs = None         # (x, y) -> mine probability, drawn on hidden cells
+        self.highlight = None     # (x, y) of the guess about to be clicked
+        self._prob_labels = {}
 
     def timer(self):
         while self.running:
@@ -138,42 +154,86 @@ class Game(Client):
             self.endgame_handler()
 
     def solve(self):
-        maxy, maxx = self.grid.contents.shape
-        memory = []
-        firstx = random.randint(0, maxx - 1)
-        firsty = random.randint(0, maxy - 1)
-        self.reveal(firstx, firsty)
-        for x in range(maxx):
-            for y in range(maxy):
-                if not self.grid.contents[y][x].hidden:
-                    for dx in range(-1, 2):
-                        for dy in range(-1, 2):
-                            if 0 <= y + dy < maxy and 0 <= x + dx < maxx and self.grid.contents[y + dy][x + dx].hidden:
-                                if (x + dx, y + dy) not in memory:
-                                    memory.append((x + dx, y + dy))
-        
+        """AUTO SOLVER: plays the whole game from this thread, one visible move
+        at a time (see solver.py for how the moves are chosen)."""
+        grid = self.grid
+        solver = Solver(grid, SETTINGS["easy_start"])
+        stats = {"moves": 0, "guesses": 0, "last_guess": None}
+        self.solver_status = "Solver: starting"
+        print("Solver moves:")
 
-        print(memory)
-        print(self.snakify(memory))
+        def wait(seconds):
+            """Sleeps, holding the schedule while paused. False = solver stopped."""
+            end = time.monotonic() + seconds
+            while True:
+                if not self.solving or self.grid is not grid or not self.running:
+                    return False
+                if self.displayed_screen == Screen.GAME and grid.enabled:
+                    if time.monotonic() >= end:
+                        return True
+                else:
+                    end += 0.02
+                time.sleep(0.02)
 
-        
-    def snakify(self, l: list):
-        next_x, next_y = l[0]
-        sorted_l = []
-        for _ in range(10):
-            for dx in range(-1, 2):
-                for dy in range(-1, 2):
-                    if (next_x + dx, next_y + dy) in l:
-                        sorted_l.append((next_x + dx, next_y + dy))
-                        l.remove((next_x + dx, next_y + dy))
-                        next_x, next_y = (next_x + dx, next_y + dy)
-                        break
-                break
+        def finish(summary, status):
+            self.solving = False
+            self.probs = None
+            self.highlight = None
+            self.solver_status = status
+            print(summary)
 
-        return sorted_l
-                
+        def ended():
+            if self.reset_btn.value == COOL:
+                g = stats["guesses"]
+                finish("Won in %i moves (%i %s)" % (stats["moves"], g, "guess" if g == 1 else "guesses"), "Solver: won")
+            elif self.reset_btn.value == DEAD:
+                last = stats["last_guess"]
+                finish("Lost on guess #%i (%s%% risk)" % (stats["guesses"], pct(last.p)) if last else "Lost",
+                       "Solver: lost on a guess")
+            elif grid.troll_mode:
+                finish("Gave up: troll mode (too many mines for a safe start)", "Solver gives up: troll mode")
+            else:
+                return False
+            return True
 
-                        
+        while not ended():
+            if not wait(0):
+                return
+            result = solver.next_moves()
+            if not result.moves:
+                finish("Stopped: no moves left", "Solver: stopped")
+                return
+            self.probs = result.probs
+            if result.probs:
+                self.solver_status = "Solver: reading the odds"
+                if not wait(Game.SOLVER_PROB):
+                    return
+            for move in result.moves:
+                if move.guess:
+                    self.highlight = (move.x, move.y)
+                    self.solver_status = "Solver: guessing (%s%% risk)" % pct(move.p)
+                    if not wait(Game.SOLVER_GUESS):
+                        return
+                    self.highlight = None
+                cell = grid.contents[move.y][move.x]
+                if not cell.hidden or cell.flagged:
+                    continue  # already opened by an earlier move
+                stats["moves"] += 1
+                where = "(%i, %i)" % (move.x + 1, move.y + 1)
+                if move.guess:
+                    stats["guesses"] += 1
+                    stats["last_guess"] = move
+                    print("#%i Guess %s - %s" % (stats["moves"], where, move.reason))
+                else:
+                    self.solver_status = "Solver: certain move"
+                    print("#%i %s %s - %s" % (stats["moves"], "Flag" if move.type == "flag" else "Reveal", where, move.reason))
+                if move.type == "flag":
+                    self.flag(move.x, move.y)
+                else:
+                    self.reveal(move.x, move.y)
+                if ended() or not wait(Game.SOLVER_STEP):
+                    return
+            self.probs = None
 
     def not_over(self):
         maxy, maxx = self.grid.contents.shape
@@ -213,13 +273,18 @@ class Game(Client):
                         if not self.bot_button.clicked and self.bot_button.collidepoint(event.pos):
                             self.displayed_screen = Screen.GAME
                             self.bot_button.clicked = True
-                            threading.Thread(target=self.solve).start()
+                            self.grid.enabled = True  # so the timer runs and Esc pauses the solver
+                            self.solver_board = True
+                            self.solving = True
+                            threading.Thread(target=self.solve, daemon=True).start()
 
 
             case Screen.GAME:
                 x = (event.pos[0] - LRB_BORDER) / CELL_EDGE
                 y = (event.pos[1] - TOP_BORDER) / CELL_EDGE
                 if self.grid.enabled and TOP_BORDER < event.pos[1] < DISP_H - LRB_BORDER and LRB_BORDER < event.pos[0] < DISP_W - LRB_BORDER:
+                    if self.solving:
+                        return  # the board is the solver's while it plays
                     x = floor(x)
                     y = floor(y)
                     actions = {
@@ -311,6 +376,8 @@ class Game(Client):
             case Screen.GAME:
                 self.draw_panel()
                 self.grid.draw()
+                if self.solver_board:
+                    self.draw_solver_overlay()
             case Screen.SETTINGS:
                 self.draw_panel()
                 self.draw_settings()
@@ -335,6 +402,44 @@ class Game(Client):
  
 
 #-----#
+
+    def prob_label(self, text: str):
+        """Rendered (outline, fill) surfaces for a probability label, cached."""
+        if text not in self._prob_labels:
+            p = 0.0 if text == "<1" else 1.0 if text == ">99" else int(text) / 100
+            r, g, b = colorsys.hls_to_rgb((1 - p) / 3, 0.55, 0.95)
+            font = Game.prob_font if len(text) <= 2 else Game.prob_font_small
+            self._prob_labels[text] = (font.render(text, True, BLACK),
+                                       font.render(text, True, (int(r * 255), int(g * 255), int(b * 255))))
+        return self._prob_labels[text]
+
+    def draw_solver_overlay(self):
+        """Mine probabilities on the hidden cells, the next guess, and the status."""
+        probs = self.probs
+        if probs:
+            o = max(1, int(SETTINGS["scale"] * 1.5))
+            for (x, y), p in probs.items():
+                cell = self.grid.contents[y][x]
+                if not cell.hidden or cell.flagged:
+                    continue
+                outline, fill = self.prob_label(pct(p))
+                cx, cy = cell.center
+                for dx, dy in ((-o, 0), (o, 0), (0, -o), (0, o), (-o, -o), (o, o), (-o, o), (o, -o)):
+                    DISP.blit(outline, outline.get_rect(center=(cx + dx, cy + dy)))
+                DISP.blit(fill, fill.get_rect(center=(cx, cy)))
+        if self.highlight:
+            x, y = self.highlight
+            cell = self.grid.contents[y][x]
+            lw = max(2, int(CELL_EDGE / 12))
+            pygame.draw.rect(DISP, BLACK, cell, lw + 2)
+            pygame.draw.rect(DISP, (255, 212, 0), cell.inflate(-2, -2), lw)
+        note = self.solver_status
+        if note:
+            text = Game.font.render(note, 0, BLACK)
+            if text.get_width() > DISP_W - 2 * LRB_BORDER:
+                short = note.replace("Solver gives up: ", "").replace("Solver: ", "").replace(" risk)", "").replace("(", "")
+                text = Game.font.render(short, 0, BLACK)
+            DISP.blit(text, text.get_rect(center=(DISP_W // 2, (self.reset_btn.top + CELL_EDGE + TOP_BORDER) / 2)))
 
     def draw_pause_menu(self):
         text = Game.pause_font.render("PAUSED", 0, BLACK)
@@ -446,6 +551,11 @@ class Game(Client):
         self.flagged_cells = 0
         self.grid.clicked_cell = None
         self.grid.troll_mode = False
+        self.solving = False
+        self.solver_board = False
+        self.solver_status = ""
+        self.probs = None
+        self.highlight = None
         self.grid = Grid()
         self.grid.enabled = True
 
