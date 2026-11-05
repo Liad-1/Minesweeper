@@ -1,7 +1,7 @@
 {
     "width": 20,
     "height": 15,
-    "mines%": 15,
+    "mines%": 30,
     "scale": 1.2,
     "easy_start": true,
     "play_sounds": false,

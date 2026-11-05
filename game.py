@@ -32,14 +32,15 @@ class Game(Client):
 
     font = pygame.font.Font(FONTS + "Font.ttf", FONT_SIZE)
     pause_font = pygame.font.Font(FONTS + "Font.ttf", PAUSE_FONT_SIZE)
+    pause_label_font = pygame.font.Font(FONTS + "Font.ttf", int(CELL_EDGE * 0.75))
     prob_font = pygame.font.Font(FONTS + "Font.ttf", int(CELL_EDGE * 0.42))
     prob_font_small = pygame.font.Font(FONTS + "Font.ttf", int(CELL_EDGE * 0.34))
 
     # AUTO SOLVER pacing (seconds): one certain move, showing the probabilities
     # before acting on them, and highlighting a guess before clicking it.
-    SOLVER_STEP = 0.25
-    SOLVER_PROB = 0.9
-    SOLVER_GUESS = 0.6
+    SOLVER_STEP = 0.15
+    SOLVER_PROB = 0.6
+    SOLVER_GUESS = 0.4
 
     def __init__(self) -> None:
         super().__init__()
@@ -382,7 +383,11 @@ class Game(Client):
                 self.draw_panel()
                 self.draw_settings()
             case Screen.PAUSE:
+                # The board stays on screen, frozen, under the PAUSED label.
                 self.draw_panel()
+                self.grid.draw()
+                if self.solver_board:
+                    self.draw_solver_overlay()
                 self.draw_pause_menu()
 
 
@@ -434,17 +439,22 @@ class Game(Client):
             pygame.draw.rect(DISP, BLACK, cell, lw + 2)
             pygame.draw.rect(DISP, (255, 212, 0), cell.inflate(-2, -2), lw)
         note = self.solver_status
-        if note:
+        if note and self.displayed_screen != Screen.PAUSE:  # the PAUSED label goes there
             text = Game.font.render(note, 0, BLACK)
             if text.get_width() > DISP_W - 2 * LRB_BORDER:
                 short = note.replace("Solver gives up: ", "").replace("Solver: ", "").replace(" risk)", "").replace("(", "")
                 text = Game.font.render(short, 0, BLACK)
-            DISP.blit(text, text.get_rect(center=(DISP_W // 2, (self.reset_btn.top + CELL_EDGE + TOP_BORDER) / 2)))
+            DISP.blit(text, text.get_rect(center=(DISP_W // 2, self.status_y())))
+
+    def status_y(self):
+        """Vertical centre of the strip between the smiley and the grid."""
+        return (self.reset_btn.bottom + TOP_BORDER) / 2
 
     def draw_pause_menu(self):
-        text = Game.pause_font.render("PAUSED", 0, BLACK)
-        DISP.blit(text, text.get_rect(
-            center=(DISP_W // 2, DISP_H // 2)))
+        # Drawn in the strip between the smiley and the grid (where the solver's
+        # status goes), so the frozen board stays fully visible.
+        text = Game.pause_label_font.render("PAUSED", 0, BLACK)
+        DISP.blit(text, text.get_rect(center=(DISP_W // 2, self.status_y())))
         
 
     def draw_main_menu(self):
